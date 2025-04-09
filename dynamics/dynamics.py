@@ -345,6 +345,91 @@ class Dubins3D(Dynamics):
             'z_axis_idx': 2,
         }
 
+class RobotNavigation2D(Dynamics):
+    def __init__(self, targetR:float, velocity:float, set_mode:str, freeze_model: bool=False):
+        self.targetR = targetR
+        self.velocity = velocity
+        self.freeze_model = freeze_model
+        super().__init__(
+            loss_type='brt_hjivi', set_mode=set_mode,
+            state_dim=2, input_dim=3, control_dim=1, disturbance_dim=0,
+            state_mean=[0, 0],
+            state_var=[1, 1],
+            value_mean=0.25,
+            value_var=0.5,
+            value_normto=0.02,
+            deepreach_model="exact"
+        )
+
+    def state_test_range(self):
+        return [
+            [-1, 1],
+            [-1, 1],
+        ]
+
+    def equivalent_wrapped_state(self, state):
+        return torch.clone(state)
+       
+    # Robot dynamics with direct heading control
+    def dsdt(self, state, control, disturbance):
+        dsdt = torch.zeros_like(state)
+        theta = control[..., 0]  # Heading is directly controlled
+        dsdt[..., 0] = self.velocity*torch.cos(theta)
+        dsdt[..., 1] = self.velocity*torch.sin(theta)
+        return dsdt
+   
+    def boundary_fn(self, state):
+        return torch.norm(state[..., :2], dim=-1) - self.targetR
+
+    def sample_target_state(self, num_samples):
+        # Generate random samples inside the target region
+        radius = torch.rand(num_samples, 1) * self.targetR
+        angle = torch.rand(num_samples, 1) * 2 * math.pi
+       
+        x = radius * torch.cos(angle)
+        y = radius * torch.sin(angle)
+       
+        return torch.cat((x, y), dim=1)
+   
+    def cost_fn(self, state_traj):
+        return torch.min(self.boundary_fn(state_traj), dim=-1).values
+   
+    def hamiltonian(self, state, dvds):
+        # Compute optimal heading direction based on gradient
+        gradient_magnitude = torch.sqrt(dvds[..., 0]**2 + dvds[..., 1]**2)
+       
+        if self.set_mode == 'reach':
+            # For reach, we want to move toward the target when possible
+            # Minimize over control = maximize negative value
+            return -self.velocity * gradient_magnitude
+        elif self.set_mode == 'avoid':
+            # For avoid, we want to move away from the target when possible
+            # Maximize over control = maximize positive value
+            return self.velocity * gradient_magnitude
+
+    def optimal_control(self, state, dvds):
+        if self.set_mode == 'reach':
+            # Heading opposite to gradient direction (to reach target)
+            heading = torch.atan2(-dvds[..., 1], -dvds[..., 0])
+        elif self.set_mode == 'avoid':
+            # Heading in gradient direction (to avoid target)
+            heading = torch.atan2(dvds[..., 1], dvds[..., 0])
+       
+        return heading[..., None]
+
+    def optimal_disturbance(self, state, dvds):
+        # No disturbance in this problem
+        return torch.zeros_like(state[..., :1])
+   
+    def plot_config(self):
+        return {
+            'state_slices': [0, 0],
+            'state_labels': ['x', 'y'],
+            'x_axis_idx': 0,
+            'y_axis_idx': 1,
+            'z_axis_idx': -1,  # No third dimension
+        }
+
 class Dubins4D(Dynamics):
     def __init__(self, bound_mode:str):
         self.vMin = 0.2
